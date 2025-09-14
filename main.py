@@ -82,16 +82,23 @@ STAGE_IMAGES = {
 }
 
 def check_environment_variables():
-    """Проверка обязательных переменных окружения"""
+    """Проверка обязательных переменных окружения.
+    CHANNEL_ID может быть числовым (-100...) или @username.
+    """
     required_vars = ['BOT_TOKEN', 'GIGACHAT_AUTHORIZATION_KEY', 'CHANNEL_ID']
     missing = [v for v in required_vars if not os.getenv(v)]
     if missing:
         raise EnvironmentError(f"Missing env vars: {', '.join(missing)}")
-    
+
+    ch = os.getenv('CHANNEL_ID', '').strip()
+    if not ch:
+        raise EnvironmentError("CHANNEL_ID is empty")
+    if ch.startswith('@'):
+        return  # допустим @username
     try:
-        int(os.getenv('CHANNEL_ID'))
+        int(ch)  # допустим -100...
     except (ValueError, TypeError):
-        raise EnvironmentError("CHANNEL_ID must be a valid integer")
+        raise EnvironmentError("CHANNEL_ID must be -100… integer or @username")
 
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     """Быстрый старт для Этапа 1: выбор типа запроса"""
@@ -161,13 +168,31 @@ async def typing_action(app: Application, chat_id: int):
     finally:
         pass
 
+def build_channel_link(channel_id: str) -> str:
+    """
+    Строит ссылку на канал:
+    - если @username — https://t.me/username
+    - если -100... — t.me/c/<id без -100>
+    Если задан CHANNEL_LINK в .env — используем его (подходит для приватных инвайтов).
+    """
+    link_env = os.getenv('CHANNEL_LINK', '').strip()
+    if link_env:
+        return link_env
+
+    ch = (channel_id or "").strip()
+    if ch.startswith('@'):
+        return f"https://t.me/{ch.lstrip('@')}"
+    clean_id = ch.replace('-100', '')
+    return f"https://t.me/c/{clean_id}"
+
 # ========================
 # Класс бота
 # ========================
 class PromptBot:
     def __init__(self):
         self.token = os.getenv('BOT_TOKEN')
-        self.channel_id = int(os.getenv('CHANNEL_ID'))
+        # Может быть '@mychannel' или '-100123...'; оставляем как есть
+        self.channel_id = os.getenv('CHANNEL_ID', '').strip()
         self.application = Application.builder().token(self.token).build()
         self.bot_instance = Bot(token=self.token)
 
@@ -184,9 +209,12 @@ class PromptBot:
         except Exception as e:
             bot_logger.error(f"HTML send error for chat {chat_id}: {type(e).__name__}")
             # Fallback: убираем HTML разметку
-            clean_text = text.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '')
-            clean_text = clean_text.replace('<i>', '').replace('</i>', '').replace('<a href="', '').replace('">', '').replace('</a>', '')
-            
+            clean_text = (text or "")
+            clean_text = clean_text.replace('<b>', '').replace('</b>', '')
+            clean_text = clean_text.replace('<i>', '').replace('</i>', '')
+            clean_text = clean_text.replace('<code>', '').replace('</code>', '')
+            # Грубая очистка ссылок
+            clean_text = clean_text.replace('<a href="', '').replace('">', ' ').replace('</a>', '')
             try:
                 return await self.application.bot.send_message(
                     chat_id=chat_id,
@@ -220,8 +248,8 @@ class PromptBot:
         """Показать статус генерации"""
         return await self.send_html_message(chat_id, message)
 
-    async def send_prompt_template(self, user_id: int, prompt_text: str, footer: Optional[str] = None, 
-                                 category: Optional[str] = None, next_stage: Optional[Stage] = None):
+    async def send_prompt_template(self, user_id: int, prompt_text: str, footer: Optional[str] = None,
+                                   category: Optional[str] = None, next_stage: Optional[Stage] = None):
         """Отправка сгенерированного промпта"""
         full_message = texts.SUCCESSFUL_GENERATION_TEMPLATE.format(prompt_text)
         full_message += (footer or texts.GENERATION_FOOTER)
@@ -237,14 +265,22 @@ class PromptBot:
         if is_user_banned(user_id):
             await self.send_html_message(user_id, "Доступ к боту ограничен.")
             return False
-        
+
         if not await check_subscription(user_id, self.channel_id, self.bot_instance):
-            keyboard = [[InlineKeyboardButton("✅ Я подписался", callback_data="check_subscription")]]
+            link = build_channel_link(str(self.channel_id))
+            keyboard = [
+                [InlineKeyboardButton("🔔 Подписаться", url=link)],
+                [InlineKeyboardButton("✅ Я подписался", callback_data="check_subscription")]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.COURSE], 
-                                          texts.NOT_SUBSCRIBED_MESSAGE, reply_markup)
+            await self.send_html_with_photo(
+                user_id,
+                STAGE_IMAGES[Stage.COURSE],
+                texts.NOT_SUBSCRIBED_MESSAGE,
+                reply_markup
+            )
             return False
-        
+
         return True
 
     async def check_rate_limit(self, user_id: int) -> bool:
@@ -255,11 +291,11 @@ class PromptBot:
             refill_per_sec=float(os.getenv("TB_REFILL_PER_SEC", 0.5)),
             cost=1.0
         )
-        
+
         if not allowed:
             await self.send_html_message(user_id, f"🚦 Много запросов подряд. Повторите через ~{int(wait_sec)} сек.")
             return False
-        
+
         return True
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -267,24 +303,33 @@ class PromptBot:
         try:
             user_id = update.effective_user.id
 
+            # не завершаем разговор при отсутствии подписки
             if not await self.check_user_access(user_id):
-                return ConversationHandler.END
+                return SELECTING_CATEGORY
 
             context.user_data.clear()
-            await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.COURSE], 
-                                          texts.COURSE_WELCOME, get_course_menu_keyboard())
+            await self.send_html_with_photo(
+                user_id,
+                STAGE_IMAGES[Stage.COURSE],
+                texts.COURSE_WELCOME,
+                get_course_menu_keyboard()
+            )
             return SELECTING_CATEGORY
 
         except Exception as e:
             bot_logger.error(f"Start error: {type(e).__name__} - {str(e)[:200]}")
             await self.send_html_message(update.effective_chat.id, "Ошибка. Попробуйте позже.")
-            return ConversationHandler.END
+            return SELECTING_CATEGORY
 
     async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Обработчик команды /menu"""
         user_id = update.effective_user.id
-        await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.COURSE], 
-                                      texts.COURSE_WELCOME, get_course_menu_keyboard())
+        await self.send_html_with_photo(
+            user_id,
+            STAGE_IMAGES[Stage.COURSE],
+            texts.COURSE_WELCOME,
+            get_course_menu_keyboard()
+        )
         return SELECTING_CATEGORY
 
     async def handle_category_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -294,11 +339,12 @@ class PromptBot:
             await query.answer()
             user_id = query.from_user.id
 
+            # подписка — быстрый кэш, поэтому смело проверяем
             if not await self.check_user_access(user_id):
                 return SELECTING_CATEGORY
 
-            if not await self.check_rate_limit(user_id):
-                return SELECTING_CATEGORY
+            # ⚡ ВАЖНО: rate-limit НЕ проверяем для простого выбора категории
+            # чтобы кнопки реагировали мгновенно. Лимит останется на генерации.
 
             # Карта категорий
             category_map = {
@@ -309,8 +355,11 @@ class PromptBot:
                 'create_bot': ('bot', "🤖 Готовим инструкцию по созданию бота...")
             }
 
-            # Прямой запуск книга/бот
+            # Прямой запуск книга/бот — тут уже проверим rate-limit
             if query.data in ['start_book', 'create_bot']:
+                if not await self.check_rate_limit(user_id):
+                    return SELECTING_CATEGORY
+
                 stage = Stage.STAGE2 if query.data == 'start_book' else Stage.STAGE3
                 context.user_data['stage'] = stage
                 category, _ = category_map[query.data]
@@ -352,9 +401,13 @@ class PromptBot:
                 context.user_data['stage'] = Stage.STAGE1
                 category, prompt_text = category_map[query.data]
                 context.user_data['category'] = category
-                
-                await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.STAGE1], 
-                                              texts.STAGE_INSTRUCTIONS["stage1_prompt"], get_stage1_keyboard())
+
+                await self.send_html_with_photo(
+                    user_id,
+                    STAGE_IMAGES[Stage.STAGE1],
+                    texts.STAGE_INSTRUCTIONS["stage1_prompt"],
+                    get_stage1_keyboard()
+                )
                 await self.send_html_message(user_id, prompt_text)
                 return TYPING_PROMPT
 
@@ -377,18 +430,36 @@ class PromptBot:
                 is_subscribed = await check_subscription(user_id, self.channel_id, self.bot_instance)
                 if is_subscribed:
                     context.user_data.clear()
-                    await query.delete_message()
-                    await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.COURSE], 
-                                                  texts.COURSE_WELCOME, get_course_menu_keyboard())
+                    try:
+                        await query.delete_message()
+                    except Exception:
+                        pass
+                    await self.send_html_with_photo(
+                        user_id,
+                        STAGE_IMAGES[Stage.COURSE],
+                        texts.COURSE_WELCOME,
+                        get_course_menu_keyboard()
+                    )
                     return SELECTING_CATEGORY
                 else:
-                    keyboard = [[InlineKeyboardButton("✅ Я подписался", callback_data="check_subscription")]]
+                    keyboard = [
+                        [InlineKeyboardButton("🔔 Подписаться", url=build_channel_link(str(self.channel_id)))],
+                        [InlineKeyboardButton("✅ Я подписался", callback_data="check_subscription")]
+                    ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
-                    await query.edit_message_caption(
-                        caption=texts.NOT_SUBSCRIBED_MESSAGE,
-                        reply_markup=reply_markup,
-                        parse_mode='HTML'
-                    )
+                    try:
+                        await query.edit_message_caption(
+                            caption=texts.NOT_SUBSCRIBED_MESSAGE,
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                    except Exception:
+                        # Если сообщение было без фото — редактируем текст
+                        await query.edit_message_text(
+                            text=texts.NOT_SUBSCRIBED_MESSAGE,
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
                     return SELECTING_CATEGORY
 
             elif data == 'copy_prompt':
@@ -405,58 +476,102 @@ class PromptBot:
 
                 context.user_data.clear()
                 context.user_data['stage'] = Stage.STAGE1
-                await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.STAGE1], 
-                                              texts.WELCOME_MESSAGE, get_main_menu_keyboard())
+                await self.send_html_with_photo(
+                    user_id,
+                    STAGE_IMAGES[Stage.STAGE1],
+                    texts.WELCOME_MESSAGE,
+                    get_main_menu_keyboard()
+                )
                 return TYPING_PROMPT
 
             elif data == Stage.COURSE.value:
                 context.user_data.clear()
-                await query.delete_message()
-                await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.COURSE], 
-                                              texts.COURSE_WELCOME, get_course_menu_keyboard())
+                try:
+                    await query.delete_message()
+                except Exception:
+                    pass
+                await self.send_html_with_photo(
+                    user_id,
+                    STAGE_IMAGES[Stage.COURSE],
+                    texts.COURSE_WELCOME,
+                    get_course_menu_keyboard()
+                )
                 return SELECTING_CATEGORY
 
             elif data == Stage.STAGE1.value:
                 context.user_data['stage'] = Stage.STAGE1
-                await query.delete_message()
-                await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.STAGE1], 
-                                              texts.STAGE_INSTRUCTIONS["stage1_prompt"], get_stage1_keyboard())
+                try:
+                    await query.delete_message()
+                except Exception:
+                    pass
+                await self.send_html_with_photo(
+                    user_id,
+                    STAGE_IMAGES[Stage.STAGE1],
+                    texts.STAGE_INSTRUCTIONS["stage1_prompt"],
+                    get_stage1_keyboard()
+                )
                 await self.send_html_message(user_id, texts.QUESTION_PROMPT)
                 return TYPING_PROMPT
 
             elif data == 'open_stage2' or data == Stage.STAGE2.value:
                 context.user_data['stage'] = Stage.STAGE2
-                await query.delete_message()
-                await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.STAGE2], 
-                                              texts.STAGE_INSTRUCTIONS["stage2_book"], get_book_keyboard())
+                try:
+                    await query.delete_message()
+                except Exception:
+                    pass
+                await self.send_html_with_photo(
+                    user_id,
+                    STAGE_IMAGES[Stage.STAGE2],
+                    texts.STAGE_INSTRUCTIONS["stage2_book"],
+                    get_book_keyboard()
+                )
                 return SELECTING_CATEGORY
 
             elif data == 'open_stage3' or data == Stage.STAGE3.value:
                 context.user_data['stage'] = Stage.STAGE3
-                await query.delete_message()
-                await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.STAGE3], 
-                                              texts.STAGE_INSTRUCTIONS["stage3_code"], get_bot_keyboard())
+                try:
+                    await query.delete_message()
+                except Exception:
+                    pass
+                await self.send_html_with_photo(
+                    user_id,
+                    STAGE_IMAGES[Stage.STAGE3],
+                    texts.STAGE_INSTRUCTIONS["stage3_code"],
+                    get_bot_keyboard()
+                )
                 return SELECTING_CATEGORY
 
             elif data == Stage.STAGE4.value:
                 context.user_data['stage'] = Stage.STAGE4
-                await query.delete_message()
-                await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.STAGE4], 
-                                              texts.STAGE_INSTRUCTIONS["stage4_image"] + "\n\n📝 Опишите сцену одной фразой:")
+                try:
+                    await query.delete_message()
+                except Exception:
+                    pass
+                await self.send_html_with_photo(
+                    user_id,
+                    STAGE_IMAGES[Stage.STAGE4],
+                    texts.STAGE_INSTRUCTIONS["stage4_image"] + "\n\n📝 Опишите сцену одной фразой:"
+                )
                 return TYPING_PROMPT
 
             elif data == Stage.STAGE5.value:
                 context.user_data['stage'] = Stage.STAGE5
-                await query.delete_message()
-                await self.send_html_with_photo(user_id, STAGE_IMAGES[Stage.STAGE5], 
-                                              texts.STAGE_INSTRUCTIONS["stage5_video"] + "\n\n📝 Опишите идею ролика одной фразой:")
+                try:
+                    await query.delete_message()
+                except Exception:
+                    pass
+                await self.send_html_with_photo(
+                    user_id,
+                    STAGE_IMAGES[Stage.STAGE5],
+                    texts.STAGE_INSTRUCTIONS["stage5_video"] + "\n\n📝 Опишите идею ролика одной фразой:"
+                )
                 return TYPING_PROMPT
 
             return SELECTING_CATEGORY
 
         except Exception as e:
             bot_logger.error(f"Callback error: {type(e).__name__}")
-            await self.send_html_message(user_id, "Ошибка. Попробуйте снова.")
+            await self.send_html_message(update.effective_chat.id, "Ошибка. Попробуйте снова.")
             return SELECTING_CATEGORY
 
     async def handle_user_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -482,10 +597,11 @@ class PromptBot:
 
             user_logger.info(f"{user_id}: {user_input[:100]}...")
 
-            # Проверка доступа
+            # Проверка доступа (быстро из кэша)
             if not await self.check_user_access(user_id):
                 return SELECTING_CATEGORY
 
+            # rate-limit именно на генерации
             if not await self.check_rate_limit(user_id):
                 return TYPING_PROMPT
 
@@ -505,7 +621,7 @@ class PromptBot:
             # Определение стадии и категории
             stage: Stage = context.user_data.get('stage', Stage.STAGE1)
             category = context.user_data.get('category', 'question')
-            
+
             if stage == Stage.STAGE4:
                 category = 'image'
             elif stage == Stage.STAGE5:
@@ -553,13 +669,19 @@ class PromptBot:
 
     def setup_handlers(self):
         """Настройка обработчиков"""
+
+        # ГЛОБАЛЬНЫЙ обработчик «Я подписался»
+        self.application.add_handler(
+            CallbackQueryHandler(self.handle_button_callback, pattern=r'^check_subscription$')
+        )
+
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('start', self.start), CommandHandler('menu', self.menu)],
             states={
                 SELECTING_CATEGORY: [
-                    # Обрабатываем категории Этапа 1 и прямые запуски в отдельном обработчике
+                    # Отдельно разбираем только кнопки, способные сразу запустить генерацию
                     CallbackQueryHandler(self.handle_category_selection, pattern=r'^(category_(question|event|advice)|start_book|create_bot)$'),
-                    # Все остальные callback-и обрабатываем здесь
+                    # Остальные callback-и — навигация/подтверждения/возвраты
                     CallbackQueryHandler(self.handle_button_callback),
                 ],
                 TYPING_PROMPT: [

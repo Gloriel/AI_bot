@@ -1,0 +1,4 @@
+2025-09-02 16:18:42,135 - ERROR - User input error: AsyncClient.__init__() got an unexpected keyword argument 'proxies'
+2025-09-02 16:22:49,543 - ERROR - User input error: AsyncClient.__init__() got an unexpected keyword argument 'proxies'
+2025-09-03 11:05:52,144 - ERROR - User input error: AsyncClient.__init__() got an unexpected keyword argument 'proxies'
+2025-09-09 12:47:43,405 - ERROR - Input error: NameError - name 'texts' is not defined

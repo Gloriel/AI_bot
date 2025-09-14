@@ -1,9 +1,18 @@
 import json
 import os
 import asyncio
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime
 from telegram import Bot
-import time
+
+# Настройка логгера — согласован с основным ботом
+logger = logging.getLogger('database')
+logger.setLevel(logging.WARNING)
+if not logger.handlers:
+    handler = logging.FileHandler('logs/database_errors.log', encoding='utf-8')
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 # Асинхронная блокировка для файловых операций
 file_lock = asyncio.Lock()
@@ -22,26 +31,26 @@ def ensure_data_files():
             with open(CREDITS_FILE, 'w', encoding='utf-8') as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"⚠️ Init file error {CREDITS_FILE}: {e}")
+            logger.warning(f"Init file error {CREDITS_FILE}: {e}")
 
     if not os.path.exists(BANNED_FILE):
         try:
             with open(BANNED_FILE, 'w', encoding='utf-8') as f:
                 pass
         except Exception as e:
-            print(f"⚠️ Init file error {BANNED_FILE}: {e}")
+            logger.warning(f"Init file error {BANNED_FILE}: {e}")
 
     if not os.path.exists(RATE_FILE):
         try:
             with open(RATE_FILE, 'w', encoding='utf-8') as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"⚠️ Init file error {RATE_FILE}: {e}")
+            logger.warning(f"Init file error {RATE_FILE}: {e}")
 
 def init_user_data():
     """Инициализация данных пользователя"""
     ensure_data_files()
-    print("📁 Data files initialized")
+    logger.info("📁 Data files initialized")
 
 async def load_json_data(filename: str, default=None):
     try:
@@ -51,7 +60,7 @@ async def load_json_data(filename: str, default=None):
                 with open(filename, 'r', encoding='utf-8') as f:
                     return json.load(f)
     except (json.JSONDecodeError, Exception) as e:
-        print(f"⚠️ Load error {filename}: {e}")
+        logger.warning(f"Load error {filename}: {e}")
         async with file_lock:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(default or {}, f, ensure_ascii=False, indent=2)
@@ -64,7 +73,7 @@ async def save_json_data(filename: str, data):
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"⚠️ Save error {filename}: {e}")
+        logger.warning(f"Save error {filename}: {e}")
 
 # --- Кредиты (оставлено для совместимости с ранними версиями) ---
 def get_user_credits(user_id: int) -> int:
@@ -90,7 +99,7 @@ def update_user_credits(user_id: int, credits: int):
         with open(CREDITS_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"⚠️ Update credits error: {e}")
+        logger.warning(f"Update credits error: {e}")
 
 # --- Бан-лист ---
 def is_user_banned(user_id: int) -> bool:
@@ -100,7 +109,7 @@ def is_user_banned(user_id: int) -> bool:
             banned_users = [line.strip() for line in f if line.strip()]
             return str(user_id) in banned_users
     except Exception as e:
-        print(f"⚠️ Banned check error: {e}")
+        logger.warning(f"Banned check error: {e}")
     return False
 
 def add_banned_user(user_id: int):
@@ -109,20 +118,39 @@ def add_banned_user(user_id: int):
         with open(BANNED_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{user_id}\n")
     except Exception as e:
-        print(f"⚠️ Ban error: {e}")
+        logger.warning(f"Ban error: {e}")
 
-# --- Проверка подписки ---
-async def check_subscription(user_id: int, channel_id: int, bot: Bot) -> bool:
+# --- Проверка подписки — ИСПРАВЛЕННАЯ ВЕРСИЯ ---
+async def check_subscription(user_id: int, channel_id, bot: Bot) -> bool:
     """
     Возвращает True, если пользователь подписан на канал.
-    В случае ошибок сети/доступа — fail-open (True), чтобы не ломать UX.
+    
+    Поддерживает:
+    - Числовой ID канала (например: -100123456789)
+    - Юзернейм канала (например: "@mychannel")
+    
+    При любых ошибках (нет доступа, канал удалён, бот не админ и т.д.) — возвращает False.
+    Это безопасный fail-closed — гарантирует, что только подписчики получают доступ.
     """
     try:
+        # Если channel_id — это строка и начинается с '@', преобразуем в числовой ID
+        if isinstance(channel_id, str) and channel_id.startswith('@'):
+            chat = await bot.get_chat(channel_id)
+            channel_id = chat.id
+
+        # Теперь channel_id должен быть int
+        if not isinstance(channel_id, int):
+            logger.warning(f"Invalid channel_id type: {type(channel_id)}, value: {channel_id}")
+            return False
+
+        # Получаем статус пользователя в канале
         member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
+
     except Exception as e:
-        print(f"⚠️ Subscription check error for {user_id}: {e}")
-        return True  # Fail-open для UX
+        # Любая ошибка: бот не может проверить подписку → считаем, что пользователь НЕ подписан
+        logger.warning(f"Subscription check failed for user {user_id} in channel {channel_id}: {type(e).__name__}: {e}")
+        return False  # 🔴 FAIL-CLOSED — безопасно!
 
 # --- Token Bucket per user (персистентный) ---
 def _load_rate_state() -> dict:
@@ -139,7 +167,7 @@ def _save_rate_state(state: dict):
         with open(RATE_FILE, 'w', encoding='utf-8') as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"⚠️ Save error {RATE_FILE}: {e}")
+        logger.warning(f"Save error {RATE_FILE}: {e}")
 
 def allow_request_token_bucket(
     user_id: int,

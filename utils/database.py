@@ -2,8 +2,11 @@ import json
 import os
 import asyncio
 import logging
+import time
 from datetime import datetime
+from typing import Optional, Tuple, Dict, Tuple as Tup
 from telegram import Bot
+from telegram.error import Forbidden, BadRequest, TimedOut, NetworkError
 
 # Настройка логгера — согласован с основным ботом
 logger = logging.getLogger('database')
@@ -120,37 +123,92 @@ def add_banned_user(user_id: int):
     except Exception as e:
         logger.warning(f"Ban error: {e}")
 
-# --- Проверка подписки — ИСПРАВЛЕННАЯ ВЕРСИЯ ---
+# --- Проверка подписки — кэш с TTL ---
+ALLOWED_STATUSES = {'member', 'administrator', 'creator', 'restricted'}
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    v = os.getenv(name, str(default)).strip().lower()
+    return v in ('1', 'true', 'yes', 'y', 'on')
+
+FAIL_OPEN = _env_flag('SUBSCRIPTION_FAIL_OPEN', False)
+SUB_CACHE_TTL = int(os.getenv('SUBSCRIPTION_CACHE_TTL', '600'))  # сек, по умолчанию 10 минут
+
+# (user_id, chat_id) -> (status_bool, timestamp)
+_SUB_CACHE: Dict[Tup[int, int], Tup[bool, float]] = {}
+# кэш для резолвинга @username -> chat_id
+_CHAT_RESOLVE_CACHE: Dict[str, int] = {}
+
+async def _resolve_chat_id(bot: Bot, channel_id) -> Optional[int]:
+    """Возвращает числовой chat_id по @username или числу; None при ошибке."""
+    try:
+        if isinstance(channel_id, str) and channel_id.startswith('@'):
+            # кэшируем резолв
+            if channel_id in _CHAT_RESOLVE_CACHE:
+                return _CHAT_RESOLVE_CACHE[channel_id]
+            chat = await bot.get_chat(channel_id)
+            _CHAT_RESOLVE_CACHE[channel_id] = chat.id
+            return chat.id
+        if isinstance(channel_id, str):
+            channel_id = int(channel_id)
+        return int(channel_id)
+    except Exception as e:
+        logger.warning(f"resolve chat_id failed for {channel_id}: {type(e).__name__}: {e}")
+        return None
+
+def _cache_get(user_id: int, chat_id: int) -> Optional[bool]:
+    key = (user_id, chat_id)
+    item = _SUB_CACHE.get(key)
+    if not item:
+        return None
+    status, ts = item
+    if time.time() - ts <= SUB_CACHE_TTL:
+        return status
+    # просрочен
+    _SUB_CACHE.pop(key, None)
+    return None
+
+def _cache_set(user_id: int, chat_id: int, status: bool):
+    _SUB_CACHE[(user_id, chat_id)] = (status, time.time())
+
 async def check_subscription(user_id: int, channel_id, bot: Bot) -> bool:
     """
-    Возвращает True, если пользователь подписан на канал.
-    
-    Поддерживает:
-    - Числовой ID канала (например: -100123456789)
-    - Юзернейм канала (например: "@mychannel")
-    
-    При любых ошибках (нет доступа, канал удалён, бот не админ и т.д.) — возвращает False.
-    Это безопасный fail-closed — гарантирует, что только подписчики получают доступ.
+    True, если пользователь подписан на канал.
+    Поддерживает channel_id как '-100…' так и '@username'.
+    Кэширует положительные статусы на SUBSCRIPTION_CACHE_TTL (по умолчанию 10 минут).
+    Если ранее было False или кэш истёк — делаем живую проверку.
     """
+    chat_id = await _resolve_chat_id(bot, channel_id)
+    if chat_id is None:
+        # Конфиг битый — при FAIL_OPEN=True не ломаем UX
+        return True if FAIL_OPEN else False
+
+    # 1) быстрый хит из кэша: если True — сразу возвращаем
+    cached = _cache_get(user_id, chat_id)
+    if cached is True:
+        return True
+    # Если cached False/None — идём в Telegram
+
     try:
-        # Если channel_id — это строка и начинается с '@', преобразуем в числовой ID
-        if isinstance(channel_id, str) and channel_id.startswith('@'):
-            chat = await bot.get_chat(channel_id)
-            channel_id = chat.id
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        ok = getattr(member, "status", None) in ALLOWED_STATUSES
+        _cache_set(user_id, chat_id, ok)
+        return ok
 
-        # Теперь channel_id должен быть int
-        if not isinstance(channel_id, int):
-            logger.warning(f"Invalid channel_id type: {type(channel_id)}, value: {channel_id}")
-            return False
+    except Forbidden as e:
+        logger.warning(f"check_subscription Forbidden for {chat_id}: {e}")
+        return True if FAIL_OPEN else False
 
-        # Получаем статус пользователя в канале
-        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        return member.status in ['member', 'administrator', 'creator']
+    except (TimedOut, NetworkError) as e:
+        logger.warning(f"check_subscription network issue: {type(e).__name__}: {e}")
+        return True if FAIL_OPEN else False
+
+    except BadRequest as e:
+        logger.warning(f"check_subscription BadRequest for {chat_id}: {e}")
+        return False
 
     except Exception as e:
-        # Любая ошибка: бот не может проверить подписку → считаем, что пользователь НЕ подписан
-        logger.warning(f"Subscription check failed for user {user_id} in channel {channel_id}: {type(e).__name__}: {e}")
-        return False  # 🔴 FAIL-CLOSED — безопасно!
+        logger.warning(f"check_subscription unexpected {type(e).__name__}: {e}")
+        return False
 
 # --- Token Bucket per user (персистентный) ---
 def _load_rate_state() -> dict:
@@ -174,7 +232,7 @@ def allow_request_token_bucket(
     capacity: float = 30.0,          # burst: сколько можно «залить» подряд
     refill_per_sec: float = 0.5,     # скорость пополнения: токенов/сек (≈ 30 ток/мин)
     cost: float = 1.0
-) -> tuple[bool, float]:
+) -> Tuple[bool, float]:
     """
     Возвращает (allowed, wait_seconds).
     Если allowed=False — через сколько секунд попытаться снова.

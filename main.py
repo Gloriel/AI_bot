@@ -101,13 +101,9 @@ def check_environment_variables():
         raise EnvironmentError("CHANNEL_ID must be -100… integer or @username")
 
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Быстрый старт для Этапа 1: выбор типа запроса"""
+    """Быстрый старт для Этапа 1: единая кнопка авто-определения типа"""
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(texts.BTN_QUESTION, callback_data='category_question'),
-            InlineKeyboardButton(texts.BTN_EVENT, callback_data='category_event'),
-            InlineKeyboardButton(texts.BTN_ADVICE, callback_data='category_advice')
-        ],
+        [InlineKeyboardButton(texts.BTN_AUTO, callback_data='category_auto')],
         [
             InlineKeyboardButton(texts.BTN_BOOK, callback_data='open_stage2'),
             InlineKeyboardButton(texts.BTN_CREATE_BOT, callback_data='open_stage3')
@@ -116,13 +112,9 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def get_stage1_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для этапа 1"""
+    """Клавиатура для этапа 1 — единая кнопка"""
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(texts.BTN_QUESTION, callback_data='category_question'),
-            InlineKeyboardButton(texts.BTN_EVENT, callback_data='category_event'),
-            InlineKeyboardButton(texts.BTN_ADVICE, callback_data='category_advice')
-        ],
+        [InlineKeyboardButton(texts.BTN_AUTO, callback_data='category_auto')],
         [InlineKeyboardButton("🏠 В меню курса", callback_data=Stage.COURSE.value)]
     ])
 
@@ -252,7 +244,17 @@ class PromptBot:
                                    category: Optional[str] = None, next_stage: Optional[Stage] = None):
         """Отправка сгенерированного промпта"""
         full_message = texts.SUCCESSFUL_GENERATION_TEMPLATE.format(prompt_text)
-        full_message += (footer or texts.GENERATION_FOOTER)
+
+        # Базовый универсальный футер
+        base_footer = footer or texts.GENERATION_FOOTER
+
+        # При image/video — добавляем списки сервисов
+        if category == 'image':
+            base_footer += texts.IMAGE_SERVICES
+        elif category == 'video':
+            base_footer += texts.VIDEO_SERVICES
+
+        full_message += base_footer
         full_message += texts.CONTINUE_FOOTER
 
         if len(full_message) > 4096:
@@ -348,9 +350,7 @@ class PromptBot:
 
             # Карта категорий
             category_map = {
-                'category_question': ('question', texts.QUESTION_PROMPT),
-                'category_event': ('event', texts.EVENT_PROMPT),
-                'category_advice': ('advice', texts.ADVICE_PROMPT),
+                'category_auto': ('auto', texts.AUTO_PROMPT),
                 'start_book': ('book', "📖 Готовим промпт для вашей книги..."),
                 'create_bot': ('bot', "🤖 Готовим инструкцию по созданию бота...")
             }
@@ -396,8 +396,8 @@ class PromptBot:
 
                 return SELECTING_CATEGORY
 
-            # Этап 1: выбор подкатегории (вопрос/событие/совет)
-            elif query.data in ['category_question', 'category_event', 'category_advice']:
+            # Этап 1: единая кнопка авто-типизации
+            elif query.data in ['category_auto']:
                 context.user_data['stage'] = Stage.STAGE1
                 category, prompt_text = category_map[query.data]
                 context.user_data['category'] = category
@@ -476,6 +476,7 @@ class PromptBot:
 
                 context.user_data.clear()
                 context.user_data['stage'] = Stage.STAGE1
+                context.user_data['category'] = 'auto'
                 await self.send_html_with_photo(
                     user_id,
                     STAGE_IMAGES[Stage.STAGE1],
@@ -500,6 +501,7 @@ class PromptBot:
 
             elif data == Stage.STAGE1.value:
                 context.user_data['stage'] = Stage.STAGE1
+                context.user_data['category'] = 'auto'
                 try:
                     await query.delete_message()
                 except Exception:
@@ -510,7 +512,7 @@ class PromptBot:
                     texts.STAGE_INSTRUCTIONS["stage1_prompt"],
                     get_stage1_keyboard()
                 )
-                await self.send_html_message(user_id, texts.QUESTION_PROMPT)
+                await self.send_html_message(user_id, texts.AUTO_PROMPT)
                 return TYPING_PROMPT
 
             elif data == 'open_stage2' or data == Stage.STAGE2.value:
@@ -620,7 +622,7 @@ class PromptBot:
 
             # Определение стадии и категории
             stage: Stage = context.user_data.get('stage', Stage.STAGE1)
-            category = context.user_data.get('category', 'question')
+            category = context.user_data.get('category', 'auto')
 
             if stage == Stage.STAGE4:
                 category = 'image'
@@ -679,8 +681,8 @@ class PromptBot:
             entry_points=[CommandHandler('start', self.start), CommandHandler('menu', self.menu)],
             states={
                 SELECTING_CATEGORY: [
-                    # Отдельно разбираем только кнопки, способные сразу запустить генерацию
-                    CallbackQueryHandler(self.handle_category_selection, pattern=r'^(category_(question|event|advice)|start_book|create_bot)$'),
+                    # Единая кнопка авто-режима + прямые запуски
+                    CallbackQueryHandler(self.handle_category_selection, pattern=r'^(category_auto|start_book|create_bot)$'),
                     # Остальные callback-и — навигация/подтверждения/возвраты
                     CallbackQueryHandler(self.handle_button_callback),
                 ],

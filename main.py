@@ -196,6 +196,7 @@ class PromptBot:
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode='HTML',
+                disable_web_page_preview=True,  # Отключаем превью ссылок
                 **kwargs
             )
         except Exception as e:
@@ -212,6 +213,7 @@ class PromptBot:
                     chat_id=chat_id,
                     text=clean_text[:4096],
                     reply_markup=reply_markup,
+                    disable_web_page_preview=True,  # Также в fallback
                     **kwargs
                 )
             except Exception:

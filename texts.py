@@ -91,7 +91,7 @@ SUCCESSFUL_GENERATION_TEMPLATE = (
 GENERATION_FOOTER = (
     "\n\n📌 <b>Куда вставить:</b>\n"
     "Просто скопируйте → вставьте в любой ИИ:\n"
-    ">  → <a href='https://giga.chat'>GigaChat</a>\n"
+    "  → <a href='https://giga.chat'>GigaChat</a>\n"
     "  → <a href='https://syntx.ai'>Syntx AI</a>\n" 
     "  → <a href='https://chat.qwen.ai'>Qwen</a>\n"
     "  → <a href='https://www.chat.deepseek.com'>DeepSeek</a>\n"
@@ -102,7 +102,7 @@ GENERATION_FOOTER = (
 BOOK_GENERATION_FOOTER = (
     "\n\n📌 <b>Куда вставить:</b>\n"
     "Просто скопируйте → вставьте в любой ИИ:\n"
-    ">  → <a href='https://giga.chat'>GigaChat</a>\n"
+    "  → <a href='https://giga.chat'>GigaChat</a>\n"
     "  → <a href='https://syntx.ai'>Syntx AI</a>\n" 
     "  → <a href='https://chat.qwen.ai'>Qwen</a>\n"
     "  → <a href='https://www.chat.deepseek.com'>DeepSeek</a>\n"
@@ -113,7 +113,7 @@ BOOK_GENERATION_FOOTER = (
 # Доп. списки сервисов, показываются автоматически для image/video
 IMAGE_SERVICES = (
     "\n\n🖼️ <b>Где оживить ваш промпт:</b>\n"
-    ">  → <a href='https://www.midjourney.com/'>Midjourney</a> — для артов и фантазий\n"
+    "  → <a href='https://www.midjourney.com/'>Midjourney</a> — для артов и фантазий\n"
     "  → <a href='https://ideogram.ai/'>Ideogram</a> — если важен текст на картинке\n"
     "  → <a href='https://leonardo.ai/'>Leonardo</a> — баланс качества и скорости\n"
     "  → <a href='https://playground.com/'>Playground</a> — для экспериментов\n"
@@ -123,7 +123,7 @@ IMAGE_SERVICES = (
 
 VIDEO_SERVICES = (
     "\n\n🎬 <b>Где запустить ваш сториборд:</b>\n"
-    ">  → <a href='https://runwayml.com/'>Runway</a> — киношное качество\n"
+    "  → <a href='https://runwayml.com/'>Runway</a> — киношное качество\n"
     "  → <a href='https://pika.art/'>Pika</a> — анимация и стиль\n"
     "  → <a href='https://lumalabs.ai/dream-machine'>Luma</a> — 3D-реализм\n"
     "  → <a href='https://klingai.com/'>Kling</a> — динамика и плавность\n"

@@ -121,11 +121,11 @@ def get_stage1_keyboard() -> InlineKeyboardMarkup:
 def get_course_menu_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура главного меню курса"""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ Превращаем запрос в идеальный промпт", callback_data=Stage.STAGE1.value)],
+        [InlineKeyboardButton("1️⃣ Умный поиск", callback_data=Stage.STAGE1.value)],
         [InlineKeyboardButton("2️⃣ Книга о себе", callback_data=Stage.STAGE2.value)],
         [InlineKeyboardButton("3️⃣ Конструктор кода", callback_data=Stage.STAGE3.value)],
-        [InlineKeyboardButton("4️⃣ Картинки: идеальный промпт", callback_data=Stage.STAGE4.value)],
-        [InlineKeyboardButton("5️⃣ Видео: сториборд-промпт", callback_data=Stage.STAGE5.value)],
+        [InlineKeyboardButton("4️⃣ Делаем картинки", callback_data=Stage.STAGE4.value)],
+        [InlineKeyboardButton("5️⃣ Генерируем видео", callback_data=Stage.STAGE5.value)],
     ])
 
 def get_after_result_keyboard(next_stage: Optional[Stage] = None) -> InlineKeyboardMarkup:
